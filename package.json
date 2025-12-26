@@ -45,5 +45,8 @@
     "blockchain",
     "cairo"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }
