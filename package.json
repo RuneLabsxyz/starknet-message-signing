@@ -1,6 +1,6 @@
 {
   "name": "@runelabsxyz/starknet-message-signing",
-  "version": "1.0.0",
+  "version": "0.0.2",
   "description": "TypeScript library for Starknet message signing and verification",
   "types": "dist/index.d.ts",
   "type": "module",
