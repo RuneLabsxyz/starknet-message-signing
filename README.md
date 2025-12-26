@@ -5,58 +5,143 @@ TypeScript library for Starknet typed data signing and verification with support
 ## Installation
 
 ```bash
+# Backend only (most common)
 npm install @runelabsxyz/starknet-message-signing starknet
-# or
-bun add @runelabsxyz/starknet-message-signing starknet
+
+# Frontend only needs starknet for signing
+npm install starknet
 ```
 
-## Quick Start
+## Architecture
+
+This package is designed for a **server-generates, client-signs** flow:
+
+```
+┌─────────────────┐     GET /api/login      ┌─────────────────┐
+│                 │ ◄───────────────────────│                 │
+│     SERVER      │     { typedData }       │     CLIENT      │
+│                 │ ───────────────────────►│                 │
+│  - Templates    │                         │  - Wallet       │
+│  - Generation   │     POST /api/login     │  - Signing      │
+│  - Verification │ ◄───────────────────────│                 │
+│                 │  { typedData, sig }     │                 │
+└─────────────────┘                         └─────────────────┘
+```
+
+**The frontend never generates typed data** - it receives the complete structure from your backend API and signs it with the user's wallet.
+
+### What Goes Where
+
+| Function | Backend | Frontend |
+|----------|---------|----------|
+| `createTemplate()` | ✅ Define schemas | ❌ |
+| `template.getRequest()` | ✅ Generate typed data | ❌ |
+| `template.validate()` | ✅ Validate incoming data | ❌ |
+| `verifySignature()` | ✅ Verify signatures | ❌ |
+| `verifyWithNonce()` | ✅ Replay prevention | ❌ |
+| `account.signMessage()` | ❌ | ✅ (starknet.js) |
+
+## Usage
+
+### Backend Setup
 
 ```typescript
-import {
-  createTemplate,
-  signMessage,
-  verifySignature,
-  setGlobalConfig
-} from '@runelabsxyz/starknet-message-signing';
-import { Account, RpcProvider } from 'starknet';
+// lib/signatures.ts
+import { createTemplate, setGlobalConfig } from '@runelabsxyz/starknet-message-signing';
 
-// Configure once at startup
 setGlobalConfig({
   chainId: 'SN_MAIN',
   domainName: 'MyApp'
 });
 
-// Define a signature template
-const LoginTemplate = createTemplate('Login', {
+export const LoginTemplate = createTemplate('Login', {
   Login: [
     { name: 'username', type: 'string' },
     { name: 'timestamp', type: 'felt' }
   ]
 });
+```
 
-// Client-side: Sign a message
-const request = LoginTemplate.getRequest({
-  username: 'alice',
-  timestamp: Math.floor(Date.now() / 1000)
+### Backend API Endpoints
+
+```typescript
+// GET /api/login - Generate typed data for client to sign
+import { LoginTemplate } from './lib/signatures';
+
+app.get('/api/login', (req, res) => {
+  const { username } = req.query;
+
+  const typedData = LoginTemplate.getRequest({
+    username,
+    timestamp: Math.floor(Date.now() / 1000)
+  });
+
+  res.json(typedData);
 });
-const signed = await signMessage(account, request);
 
-// Server-side: Verify the signature
-const result = await verifySignature(
-  'https://your-rpc-url.com',
-  signed.typedData,
-  signed.signature,
-  signed.address,
-  { maxAge: 300, template: LoginTemplate }
-);
+// POST /api/login - Verify the signed message
+import { verifySignature } from '@runelabsxyz/starknet-message-signing';
 
-if (result.isValid) {
-  console.log('Signature valid!');
-} else {
-  console.error(result.error);
-  // "Invalid signature" | "Account not deployed" | "Signature has expired"
+app.post('/api/login', async (req, res) => {
+  const { typedData, signature, address } = req.body;
+
+  const result = await verifySignature(
+    process.env.STARKNET_RPC_URL,
+    typedData,
+    signature,
+    address,
+    { maxAge: 300, template: LoginTemplate }
+  );
+
+  if (!result.isValid) {
+    return res.status(401).json({ error: result.error });
+    // "Invalid signature" | "Account not deployed" | "Signature has expired"
+  }
+
+  // Create session, return token, etc.
+  res.json({ success: true });
+});
+```
+
+### Frontend (No package needed!)
+
+```typescript
+// The frontend only needs starknet.js for wallet interaction
+import { connect } from 'starknetkit';  // or any wallet connector
+
+async function login(username: string) {
+  // 1. Get typed data from your backend
+  const typedData = await fetch(`/api/login?username=${username}`).then(r => r.json());
+
+  // 2. Sign with user's wallet (starknet.js)
+  const { wallet } = await connect();
+  const signature = await wallet.account.signMessage(typedData);
+
+  // 3. Send signature back to backend
+  const result = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      typedData,
+      signature,
+      address: wallet.account.address
+    })
+  });
+
+  return result.json();
 }
+```
+
+### Frontend with Package (Optional)
+
+If you want type safety or the `signMessage` helper on the frontend:
+
+```typescript
+import { signMessage, SIGNATURE_METHODS } from '@runelabsxyz/starknet-message-signing';
+
+const typedData = await fetch('/api/login?username=alice').then(r => r.json());
+const signed = await signMessage(account, typedData, SIGNATURE_METHODS.STARKNET);
+// { typedData, signature, address, method }
 ```
 
 ## Features
@@ -73,7 +158,7 @@ if (result.isValid) {
 ### Configuration
 
 ```typescript
-import { setGlobalConfig, getGlobalConfig, resetGlobalConfig } from '@runelabsxyz/starknet-message-signing';
+import { setGlobalConfig } from '@runelabsxyz/starknet-message-signing';
 
 setGlobalConfig({
   chainId: 'SN_MAIN',           // or 'SN_SEPOLIA'
@@ -96,33 +181,20 @@ const MyTemplate = createTemplate('MyMessage', {
   ]
 });
 
-// Generate typed data
-const request = MyTemplate.getRequest({
+// Generate typed data (server-side)
+const typedData = MyTemplate.getRequest({
   action: 'transfer',
   amount: 1000,
   timestamp: Math.floor(Date.now() / 1000)
 });
 
-// Validate structure
-MyTemplate.validate(request); // throws TypedDataError if invalid
+// Validate structure (server-side, when receiving from client)
+MyTemplate.validate(typedData); // throws TypedDataError if invalid
 ```
 
 **Supported types:** `string`, `felt`, `shortstring`, nested custom types
 
-### Signing (Client-side)
-
-```typescript
-import { signMessage, sign } from '@runelabsxyz/starknet-message-signing';
-
-// Returns SignedMessage with metadata
-const signed = await signMessage(account, typedData);
-// { typedData, signature, address, method }
-
-// Returns just the signature
-const signature = await sign(account, typedData);
-```
-
-### Verification (Server-side)
+### Verification
 
 ```typescript
 import { verifySignature, verify, SIGNATURE_METHODS } from '@runelabsxyz/starknet-message-signing';
@@ -141,36 +213,57 @@ const isValid = await verify(provider, typedData, signature, address);
 
 ### Nonce-based Replay Prevention
 
+For operations that must not be replayed (transfers, linking accounts, etc.):
+
 ```typescript
 import { verifyWithNonce, type NonceAdapter } from '@runelabsxyz/starknet-message-signing';
 
 // Implement your database adapter
-class MyNonceAdapter implements NonceAdapter {
+class PostgresNonceAdapter implements NonceAdapter {
   async getCurrentNonce(address: string): Promise<number | null> {
-    // Return current nonce from DB, or null if user not found
+    const row = await db.query('SELECT counter FROM users WHERE address = $1', [address]);
+    return row?.counter ?? null;
   }
 
   async updateNonce(address: string, newNonce: number): Promise<boolean> {
-    // Atomically update if newNonce > current, return success
+    const result = await db.query(
+      'UPDATE users SET counter = $1 WHERE address = $2 AND counter < $1 RETURNING 1',
+      [newNonce, address]
+    );
+    return result.rowCount > 0;
   }
 }
 
 // Template must include nonce field
-const NonceTemplate = createTemplate('Action', {
-  Action: [
-    { name: 'data', type: 'string' },
+const TransferTemplate = createTemplate('Transfer', {
+  Transfer: [
+    { name: 'to', type: 'felt' },
+    { name: 'amount', type: 'felt' },
     { name: 'nonce', type: 'felt' },
     { name: 'timestamp', type: 'felt' }
   ]
 });
 
+// Server: generate with next nonce
+app.get('/api/transfer', async (req, res) => {
+  const currentNonce = await db.getUserNonce(req.user.address);
+  const typedData = TransferTemplate.getRequest({
+    to: req.query.to,
+    amount: req.query.amount,
+    nonce: currentNonce + 1,
+    timestamp: Math.floor(Date.now() / 1000)
+  });
+  res.json(typedData);
+});
+
+// Server: verify with nonce check
 const result = await verifyWithNonce(
   provider,
   typedData,
   signature,
   address,
-  new MyNonceAdapter(),
-  { maxAge: 300, template: NonceTemplate }
+  new PostgresNonceAdapter(),
+  { maxAge: 300, template: TransferTemplate }
 );
 ```
 
@@ -199,6 +292,32 @@ try {
     // ["Login", "username"]
   }
 }
+```
+
+### Verification Errors
+
+| Error | Meaning |
+|-------|---------|
+| `"Invalid signature"` | Signature doesn't match the typed data |
+| `"Account not deployed"` | User's wallet contract isn't deployed yet |
+| `"Signature has expired"` | Timestamp is older than `maxAge` |
+| `"Invalid typed data: ..."` | Structure doesn't match template |
+| `"Invalid nonce"` | Nonce is not greater than current (replay attempt) |
+| `"User not found"` | Address not in your database (for nonce verification) |
+
+## Cartridge Controller Support
+
+For Cartridge controller wallets, specify the method:
+
+```typescript
+import { SIGNATURE_METHODS } from '@runelabsxyz/starknet-message-signing';
+
+// Client sends which method they used
+const { typedData, signature, address, method } = req.body;
+
+const result = await verifySignature(provider, typedData, signature, address, {
+  method: method || SIGNATURE_METHODS.STARKNET
+});
 ```
 
 ## Development
