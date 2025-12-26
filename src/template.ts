@@ -129,8 +129,8 @@ export function createTemplate<U extends TypedData['types'], KEY extends keyof U
           ...types,
           StarknetDomain: [
             { name: 'name', type: 'shortstring' },
-            { name: 'chainId', type: 'shortstring' },
             { name: 'version', type: 'shortstring' },
+            { name: 'chainId', type: 'shortstring' },
             { name: 'revision', type: 'shortstring' }
           ]
         }
