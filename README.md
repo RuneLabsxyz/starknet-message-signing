@@ -312,7 +312,6 @@ For Cartridge controller wallets, specify the method:
 ```typescript
 import { SIGNATURE_METHODS } from '@runelabsxyz/starknet-message-signing';
 
-// Client sends which method they used
 const { typedData, signature, address, method } = req.body;
 
 const result = await verifySignature(provider, typedData, signature, address, {
